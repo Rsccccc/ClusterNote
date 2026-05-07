@@ -15,20 +15,38 @@ import {
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
-import {
-  ExpoSpeechRecognitionModule,
-  useSpeechRecognitionEvent,
-} from 'expo-speech-recognition';
+// Safely load expo-speech-recognition only when the native module is available
+// (i.e. in a development/production build, NOT in Expo Go)
+let ExpoSpeechRecognitionModule: any = null;
+let useSpeechRecognitionEvent: (event: string, cb: (e: any) => void) => void = () => {};
+try {
+  const speechMod = require('expo-speech-recognition');
+  ExpoSpeechRecognitionModule = speechMod.ExpoSpeechRecognitionModule;
+  useSpeechRecognitionEvent = speechMod.useSpeechRecognitionEvent;
+} catch {
+  // Native module not available (Expo Go) — voice features will be disabled
+}
 import { supabase } from '../lib/supabase';
+import { encryptionApi } from '../lib/encryption';
+
+type Note = {
+  id: number;
+  title: string;
+  content: string;
+  images: string | null;
+  voice: string | null;
+  created_at: string;
+};
 
 type Props = {
   visible: boolean;
   onClose: () => void;
   username: string;
   onNoteSaved: () => void;
+  editNote?: Note | null; // when set, modal is in edit mode
 };
 
-export default function NoteModal({ visible, onClose, username, onNoteSaved }: Props) {
+export default function NoteModal({ visible, onClose, username, onNoteSaved, editNote }: Props) {
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
   const [images, setImages] = useState<string[]>([]);
@@ -36,6 +54,49 @@ export default function NoteModal({ visible, onClose, username, onNoteSaved }: P
   const [saving, setSaving] = useState(false);
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const pulseLoop = useRef<Animated.CompositeAnimation | null>(null);
+
+  const isEditMode = !!editNote;
+
+  // ── Pre-fill fields when editing ─────────────────────────────────────────────
+  useEffect(() => {
+    const prepareData = async () => {
+      if (editNote) {
+        // Try to decrypt content if it looks like encrypted JSON
+        let displayContent = editNote.content ?? '';
+        let displayTitle = editNote.title ?? '';
+        
+        try {
+          if (displayContent.startsWith('{"iv":')) {
+            const parsed = JSON.parse(displayContent);
+            if (parsed.iv && parsed.ciphertext) {
+              const result = await encryptionApi.decrypt(parsed.iv, parsed.ciphertext);
+              if (result.success) {
+                displayContent = result.data;
+              }
+            }
+          }
+          
+          if (displayTitle.startsWith('{"iv":')) {
+            const parsed = JSON.parse(displayTitle);
+            if (parsed.iv && parsed.ciphertext) {
+              const result = await encryptionApi.decrypt(parsed.iv, parsed.ciphertext);
+              if (result.success) {
+                displayTitle = result.data;
+              }
+            }
+          }
+        } catch (err) {
+          console.warn('Decryption failed:', err);
+        }
+        setTitle(displayTitle);
+        setContent(displayContent);
+      } else {
+        reset();
+      }
+    };
+    
+    prepareData();
+  }, [editNote, visible]);
 
   // ── Speech recognition events ───────────────────────────────────────────────
   useSpeechRecognitionEvent('result', (event) => {
@@ -73,7 +134,13 @@ export default function NoteModal({ visible, onClose, username, onNoteSaved }: P
   };
 
   // ── Record toggle ────────────────────────────────────────────────────────────
+  const speechAvailable = !!ExpoSpeechRecognitionModule;
+
   const toggleRecording = async () => {
+    if (!speechAvailable) {
+      Alert.alert('Not Available', 'Voice recording requires a native build. It is not supported in Expo Go.');
+      return;
+    }
     if (isRecording) {
       ExpoSpeechRecognitionModule.stop();
       setIsRecording(false);
@@ -87,7 +154,7 @@ export default function NoteModal({ visible, onClose, username, onNoteSaved }: P
       return;
     }
 
-    setContent(''); // clear old transcription
+    setContent('');
     ExpoSpeechRecognitionModule.start({
       lang: 'en-US',
       interimResults: true,
@@ -128,22 +195,72 @@ export default function NoteModal({ visible, onClose, username, onNoteSaved }: P
     setImages(prev => prev.filter((_, i) => i !== index));
   };
 
-  // ── Save note ────────────────────────────────────────────────────────────────
+  // ── Save (create or update) ──────────────────────────────────────────────────
   const handleSave = async () => {
     if (!title.trim() && !content.trim()) {
       Alert.alert('Empty Note', 'Please add a title or content before saving.');
       return;
     }
     setSaving(true);
-    const { error } = await supabase.from('Notes').insert({
-      username,
-      title: title.trim(),
-      content: content.trim(),
-      images: images.length > 0 ? JSON.stringify(images) : null,
-      voice: null,
-    });
-    setSaving(false);
-    if (error) { Alert.alert('Save Failed', error.message); return; }
+
+    let finalContent = content.trim();
+    let finalTitle = title.trim();
+
+    // Try to encrypt, but fall back to plaintext if the Edge Function isn't available
+    try {
+      if (finalContent) {
+        const encrypted = await encryptionApi.encrypt(finalContent);
+        if (encrypted && encrypted.success) {
+          finalContent = JSON.stringify({ iv: encrypted.iv, ciphertext: encrypted.ciphertext });
+        }
+      }
+      if (finalTitle) {
+        const encrypted = await encryptionApi.encrypt(finalTitle);
+        if (encrypted && encrypted.success) {
+          finalTitle = JSON.stringify({ iv: encrypted.iv, ciphertext: encrypted.ciphertext });
+        }
+      }
+    } catch (err) {
+      // Encryption not available (Edge Function not deployed yet) — save as plaintext
+      console.warn('Encryption unavailable, saving as plaintext:', err);
+      finalContent = content.trim();
+      finalTitle = title.trim();
+    }
+
+    // Perform the DB write
+    if (isEditMode && editNote) {
+      const { error } = await supabase
+        .from('Notes')
+        .update({
+          title: finalTitle,
+          content: finalContent,
+          images: images.length > 0 ? JSON.stringify(images) : null,
+        })
+        .eq('id', editNote.id);
+
+      setSaving(false);
+      if (error) {
+        console.error('Supabase UPDATE error:', error);
+        Alert.alert('Update Failed', error.message || 'Unknown error');
+        return;
+      }
+    } else {
+      const { error } = await supabase.from('Notes').insert({
+        username,
+        title: finalTitle,
+        content: finalContent,
+        images: images.length > 0 ? JSON.stringify(images) : null,
+        voice: null,
+      });
+
+      setSaving(false);
+      if (error) {
+        console.error('Supabase INSERT error:', error);
+        Alert.alert('Save Failed', error.message || 'Unknown error');
+        return;
+      }
+    }
+
     reset();
     onNoteSaved();
     onClose();
@@ -159,7 +276,7 @@ export default function NoteModal({ visible, onClose, username, onNoteSaved }: P
   };
 
   const handleClose = () => {
-    if (isRecording) ExpoSpeechRecognitionModule.stop();
+    if (isRecording && speechAvailable) ExpoSpeechRecognitionModule.stop();
     reset();
     onClose();
   };
@@ -174,7 +291,7 @@ export default function NoteModal({ visible, onClose, username, onNoteSaved }: P
 
           {/* Header */}
           <View style={styles.header}>
-            <Text style={styles.headerTitle}>New Note</Text>
+            <Text style={styles.headerTitle}>{isEditMode ? 'Edit Note' : 'New Note'}</Text>
             <TouchableOpacity onPress={handleClose}>
               <Text style={styles.cancelBtn}>✕</Text>
             </TouchableOpacity>
@@ -250,8 +367,14 @@ export default function NoteModal({ visible, onClose, username, onNoteSaved }: P
           </ScrollView>
 
           {/* Save button */}
-          <TouchableOpacity style={styles.saveBtn} onPress={handleSave} disabled={saving}>
-            <Text style={styles.saveBtnText}>{saving ? 'Saving...' : 'Save Note'}</Text>
+          <TouchableOpacity
+            style={[styles.saveBtn, isEditMode && styles.saveBtnEdit]}
+            onPress={handleSave}
+            disabled={saving}
+          >
+            <Text style={styles.saveBtnText}>
+              {saving ? 'Saving...' : isEditMode ? 'Update Note' : 'Save Note'}
+            </Text>
           </TouchableOpacity>
 
         </View>
@@ -376,6 +499,9 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     borderRadius: 30,
     alignItems: 'center',
+  },
+  saveBtnEdit: {
+    backgroundColor: '#5a6e1f',
   },
   saveBtnText: {
     color: '#fff',

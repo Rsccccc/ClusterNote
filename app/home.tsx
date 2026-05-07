@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
+  Alert,
   FlatList,
   SafeAreaView,
   StyleSheet,
@@ -15,6 +16,8 @@ import { getSession } from '../lib/session';
 import Sidebar from '../components/Sidebar';
 import NoteModal from '../components/NoteModal';
 import NoteCard from '../components/NoteCard';
+import QuizModal from '../components/QuizModal';
+import NoteViewModal from '../components/NoteViewModal';
 
 type Note = {
   id: number;
@@ -34,6 +37,9 @@ export default function Home() {
   const [noteModalOpen, setNoteModalOpen] = useState(false);
   const [notes, setNotes] = useState<Note[]>([]);
   const [search, setSearch] = useState('');
+  const [editingNote, setEditingNote] = useState<Note | null>(null);
+  const [viewingNote, setViewingNote] = useState<Note | null>(null);
+  const [quizModalOpen, setQuizModalOpen] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -63,6 +69,40 @@ export default function Home() {
 
   useEffect(() => { loadNotes(); }, [loadNotes]);
 
+  // ── Edit ──────────────────────────────────────────────────────────────────────
+  const handleEdit = (note: Note) => {
+    setEditingNote(note);
+    setNoteModalOpen(true);
+  };
+
+  // ── Delete ────────────────────────────────────────────────────────────────────
+  const handleDelete = (id: number) => {
+    Alert.alert(
+      'Delete Note',
+      'Are you sure you want to delete this note? This cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            const { error } = await supabase.from('Notes').delete().eq('id', id);
+            if (error) {
+              Alert.alert('Error', 'Failed to delete note: ' + error.message);
+            } else {
+              loadNotes();
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const handleModalClose = () => {
+    setNoteModalOpen(false);
+    setEditingNote(null);
+  };
+
   const filteredNotes = notes.filter(n =>
     n.title?.toLowerCase().includes(search.toLowerCase()) ||
     n.content?.toLowerCase().includes(search.toLowerCase())
@@ -91,7 +131,14 @@ export default function Home() {
       <FlatList
         data={filteredNotes}
         keyExtractor={item => String(item.id)}
-        renderItem={({ item }) => <NoteCard note={item} />}
+        renderItem={({ item }) => (
+          <NoteCard
+            note={item}
+            onPress={setViewingNote}
+            onEdit={handleEdit}
+            onDelete={handleDelete}
+          />
+        )}
         contentContainerStyle={styles.listContent}
         style={styles.list}
         ListEmptyComponent={
@@ -99,10 +146,25 @@ export default function Home() {
         }
       />
 
-      {/* ── FAB ── */}
-      <TouchableOpacity style={[styles.fab, isDesktop && styles.fabDesktop]} onPress={() => setNoteModalOpen(true)}>
-        <Text style={[styles.fabText, isDesktop && styles.fabTextDesktop]}>+</Text>
-      </TouchableOpacity>
+      {/* ── FAB Row ── */}
+      <View style={styles.fabRow}>
+        {/* Quiz FAB - left */}
+        <TouchableOpacity style={styles.quizFab} onPress={() => setQuizModalOpen(true)}>
+          <Text style={styles.quizFabText}>📝</Text>
+          <Text style={styles.quizFabText}>Quiz</Text>
+        </TouchableOpacity>
+
+        {/* Add Note FAB - right */}
+        <TouchableOpacity
+          style={[styles.fab, isDesktop && styles.fabDesktop]}
+          onPress={() => {
+            setEditingNote(null);
+            setNoteModalOpen(true);
+          }}
+        >
+          <Text style={[styles.fabText, isDesktop && styles.fabTextDesktop]}>+</Text>
+        </TouchableOpacity>
+      </View>
 
       {/* ── Sidebar ── */}
       <Sidebar
@@ -113,12 +175,29 @@ export default function Home() {
         onProfilePicChange={setProfilePic}
       />
 
-      {/* ── Note modal ── */}
+      {/* ── Note modal (create or edit) ── */}
       <NoteModal
         visible={noteModalOpen}
-        onClose={() => setNoteModalOpen(false)}
+        onClose={handleModalClose}
         username={username}
         onNoteSaved={loadNotes}
+        editNote={editingNote}
+      />
+
+      {/* ── Note viewer ── */}
+      <NoteViewModal
+        note={viewingNote}
+        visible={!!viewingNote}
+        onClose={() => setViewingNote(null)}
+        onEdit={(n) => { setViewingNote(null); setTimeout(() => handleEdit(n), 300); }}
+        onDelete={(id) => { setViewingNote(null); setTimeout(() => handleDelete(id), 300); }}
+      />
+
+      {/* ── Quiz modal ── */}
+      <QuizModal
+        visible={quizModalOpen}
+        onClose={() => setQuizModalOpen(false)}
+        notes={notes}
       />
     </View>
   );
@@ -184,11 +263,17 @@ const styles = StyleSheet.create({
     fontSize: 15,
   },
 
-  // FAB
-  fab: {
+  // FABs
+  fabRow: {
     position: 'absolute',
     bottom: 30,
+    left: 24,
     right: 24,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  fab: {
     width: 58,
     height: 58,
     borderRadius: 29,
@@ -215,5 +300,25 @@ const styles = StyleSheet.create({
   },
   fabTextDesktop: {
     fontSize: 48,
+  },
+  quizFab: {
+    width: 58,
+    height: 58,
+    borderRadius: 29,
+    backgroundColor: '#4A90D9',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.25,
+    shadowRadius: 6,
+    elevation: 6,
+    borderWidth: 1.5,
+    borderColor: 'rgba(0,0,0,0.08)',
+  },
+  quizFabText: {
+    fontSize: 11,
+    fontWeight: 'bold',
+    color: '#fff',
   },
 });

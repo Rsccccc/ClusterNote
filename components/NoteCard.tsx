@@ -8,6 +8,8 @@ import {
   View,
 } from 'react-native';
 import { Audio } from 'expo-av';
+import { encryptionApi } from '../lib/encryption';
+import { useEffect, useState } from 'react';
 
 type Note = {
   id: number;
@@ -20,11 +22,36 @@ type Note = {
 
 type Props = {
   note: Note;
+  onPress: (note: Note) => void;
+  onEdit: (note: Note) => void;
+  onDelete: (id: number) => void;
 };
 
-export default function NoteCard({ note }: Props) {
+export default function NoteCard({ note, onPress, onEdit, onDelete }: Props) {
   const soundRef = useRef<Audio.Sound | null>(null);
   const imageList: string[] = note.images ? JSON.parse(note.images) : [];
+  const [displayContent, setDisplayContent] = useState<string>(note.content || '');
+
+  useEffect(() => {
+    const decrypt = async () => {
+      let content = note.content || '';
+      if (content.startsWith('{"iv":')) {
+        try {
+          const parsed = JSON.parse(content);
+          if (parsed.iv && parsed.ciphertext) {
+            const result = await encryptionApi.decrypt(parsed.iv, parsed.ciphertext);
+            if (result.success) {
+              content = result.data;
+            }
+          }
+        } catch (err) {
+          console.warn('Card decryption failed:', err);
+        }
+      }
+      setDisplayContent(content);
+    };
+    decrypt();
+  }, [note.content]);
 
   const playVoice = async () => {
     try {
@@ -45,14 +72,24 @@ export default function NoteCard({ note }: Props) {
   });
 
   return (
-    <View style={styles.card}>
-      {/* Title */}
-      {!!note.title && <Text style={styles.title}>{note.title}</Text>}
+    <TouchableOpacity style={styles.card} onPress={() => onPress(note)} activeOpacity={0.85}>
+      {/* Title row with action buttons */}
+      <View style={styles.titleRow}>
+        {!!note.title && <Text style={styles.title} numberOfLines={1}>{note.title}</Text>}
+        <View style={styles.actions}>
+          <TouchableOpacity style={styles.actionBtn} onPress={() => onEdit(note)}>
+            <Text style={styles.editIcon}>✏️</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[styles.actionBtn, styles.deleteBtn]} onPress={() => onDelete(note.id)}>
+            <Text style={styles.deleteIcon}>🗑</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
 
       {/* Content */}
-      {!!note.content && (
+      {!!displayContent && (
         <Text style={styles.content} numberOfLines={3}>
-          {note.content}
+          {displayContent}
         </Text>
       )}
 
@@ -74,7 +111,7 @@ export default function NoteCard({ note }: Props) {
 
       {/* Date */}
       <Text style={styles.date}>{dateStr}</Text>
-    </View>
+    </TouchableOpacity>
   );
 }
 
@@ -90,11 +127,39 @@ const styles = StyleSheet.create({
     shadowRadius: 6,
     elevation: 3,
   },
+  titleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
   title: {
     fontSize: 16,
     fontWeight: 'bold',
     color: '#222',
-    marginBottom: 4,
+    flex: 1,
+    marginRight: 8,
+  },
+  actions: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  actionBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#f5f5f5',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  deleteBtn: {
+    backgroundColor: '#fff0f0',
+  },
+  editIcon: {
+    fontSize: 15,
+  },
+  deleteIcon: {
+    fontSize: 15,
   },
   content: {
     fontSize: 14,
